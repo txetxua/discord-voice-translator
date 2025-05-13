@@ -1,35 +1,36 @@
+// index.js
 require('dotenv').config();
 const fs = require('fs');
 const path = require('path');
-const { Client, GatewayIntentBits, Collection, ChannelType } = require('discord.js');
-// Ya no necesitas importar @discordjs/voice, prism, speech, autoTranslate aquí si no los usas directamente en index.js
-// PERO SÍ NECESITAS GatewayIntentBits.GuildVoiceStates
+const { Client, GatewayIntentBits, Collection, MessageFlags } = require('discord.js');
 
 const client = new Client({
   intents: [
     GatewayIntentBits.Guilds,
     GatewayIntentBits.GuildMessages,
     GatewayIntentBits.MessageContent,
-    GatewayIntentBits.GuildVoiceStates, // Asegúrate de que este intent está presente
+    GatewayIntentBits.GuildVoiceStates,
   ],
 });
 
-// Objeto para guardar configuraciones y estados por servidor
 const serverConfig = {};
 
 client.commands = new Collection();
 const commandsPath = path.join(__dirname, 'commands');
 const commandFiles = fs.readdirSync(commandsPath).filter(file => file.endsWith('.js'));
 
-// Cargar comandos
 for (const file of commandFiles) {
   const filePath = path.join(commandsPath, file);
-  const command = require(filePath);
-  if ('data' in command && 'execute' in command) {
-    client.commands.set(command.data.name, command);
-    console.log(`[COMANDO] Cargado: ${command.data.name}`);
-  } else {
-    console.warn(`[ADVERTENCIA] El comando en ${filePath} le falta 'data' o 'execute'.`);
+  try {
+    const command = require(filePath);
+    if (command.data && typeof command.data.name === 'string' && typeof command.execute === 'function') { // Verificación más robusta
+      client.commands.set(command.data.name, command);
+      console.log(`[COMANDO] Cargado: ${command.data.name}`);
+    } else {
+      console.warn(`[ADVERTENCIA] El comando en ${filePath} está incompleto o malformado (falta 'data.name' o 'execute').`);
+    }
+  } catch (error) {
+    console.error(`[ERROR CARGANDO COMANDO] No se pudo cargar ${filePath}:`, error);
   }
 }
 
@@ -42,34 +43,38 @@ client.on('interactionCreate', async interaction => {
 
   const command = client.commands.get(interaction.commandName);
   if (!command) {
-      console.error(`Comando no encontrado: ${interaction.commandName}`);
+      console.error(`[INTERACCIÓN ERROR] Comando no encontrado: ${interaction.commandName}`);
+      try {
+        if (!interaction.replied && !interaction.deferred) {
+          await interaction.reply({ content: 'Comando no encontrado.', flags: MessageFlags.Ephemeral });
+        } else {
+          await interaction.followUp({ content: 'Comando no encontrado.', flags: MessageFlags.Ephemeral });
+        }
+      } catch(e) { console.error("[INTERACCIÓN ERROR] No se pudo responder a comando no encontrado:", e); }
       return;
   }
 
-  // Asegúrate que existe una entrada para este servidor en serverConfig
   if (!serverConfig[interaction.guildId]) {
       serverConfig[interaction.guildId] = {};
   }
 
   try {
-    // Pasamos la config específica del server y el client por si algún comando lo necesita
+    console.log(`[INTERACCIÓN] Usuario ${interaction.user.tag} ejecutó /${interaction.commandName} en Guild ${interaction.guildId}`);
     await command.execute(interaction, serverConfig[interaction.guildId], client);
   } catch (error) {
-    console.error(`❌ Error ejecutando ${interaction.commandName}:`, error);
-
-    // Manejo de error mejorado
-    const errorMessage = 'Hubo un error al ejecutar este comando.';
-    if (interaction.replied || interaction.deferred) {
-      await interaction.followUp({ content: errorMessage, ephemeral: true }).catch(e => console.error("Error en followUp:", e));
-    } else {
-      await interaction.reply({ content: errorMessage, ephemeral: true }).catch(e => console.error("Error en reply:", e));
+    console.error(`❌ Error ejecutando el comando /${interaction.commandName} para ${interaction.user.tag} en Guild ${interaction.guildId}:`, error);
+    
+    const errorMessage = 'Hubo un error interno al procesar tu comando. Intenta de nuevo más tarde.';
+    try {
+        if (interaction.replied || interaction.deferred) {
+          await interaction.followUp({ content: errorMessage, flags: MessageFlags.Ephemeral });
+        } else {
+          await interaction.reply({ content: errorMessage, flags: MessageFlags.Ephemeral });
+        }
+    } catch (replyError) {
+        console.error("[INTERACCIÓN ERROR] No se pudo enviar mensaje de error al usuario:", replyError);
     }
   }
 });
 
-// Las funciones startListening y stopListening han sido MOVIDAS a utils/voiceHandler.js
-
 client.login(process.env.DISCORD_TOKEN);
-
-// Ya no necesitas exportar nada desde aquí (a menos que otros módulos lo necesiten)
-// module.exports = { ... };

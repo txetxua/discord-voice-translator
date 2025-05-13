@@ -6,11 +6,11 @@ const { startListening } = require('../utils/voiceHandler.js'); // Asegúrate qu
 module.exports = {
   data: new SlashCommandBuilder()
     .setName('join')
-    .setDescription('Se une a tu canal de voz y usa ESTE canal de texto para las traducciones. Inicia automáticamente.'),
+    .setDescription('Une al VC, usa canal actual para texto e inicia transcripción auto.'),
 
   async execute(interaction, config, client) {
-    const voiceChannel = interaction.member.voice.channel; // Canal de voz del usuario
-    const textOutputChannel = interaction.channel; // Canal de texto donde se ejecutó /join
+    const voiceChannel = interaction.member.voice.channel;
+    const textOutputChannel = interaction.channel;
     const guild = interaction.guild;
 
     if (!voiceChannel) {
@@ -22,77 +22,72 @@ module.exports = {
 
     if (!textOutputChannel || !textOutputChannel.isTextBased() || textOutputChannel.type === ChannelType.GuildVoice) {
         return interaction.reply({
-            content: '❌ Este comando debe usarse en un canal de texto válido donde pueda enviar las traducciones.',
+            content: '❌ Este comando debe usarse en un canal de texto válido para las traducciones.',
             flags: MessageFlags.Ephemeral
         });
     }
 
     const existingConnection = getVoiceConnection(guild.id);
-    if (existingConnection && existingConnection.joinConfig.channelId === voiceChannel.id) {
-      if (config.textChannel === textOutputChannel.id && (config.connection || config.recognizeStream)) {
-        return interaction.reply({
-          content: `✅ Ya estoy en ${voiceChannel.name}, usando ${textOutputChannel} y la transcripción está activa.`,
-          flags: MessageFlags.Ephemeral
-        });
-      }
-    } else if (existingConnection) {
-      // Si está en otro canal de voz, lo ideal sería detenerlo antes de unirse a uno nuevo.
-      // Opcionalmente, podrías llamar a stopListening aquí si quieres que cambie automáticamente.
-      // Por ahora, pedimos que se detenga manualmente.
-      return interaction.reply({
-        content: `⚠️ Ya estoy en otro canal de voz. Usa \`/stop\` primero si deseas cambiar de canal.`,
-        flags: MessageFlags.Ephemeral
-      });
+    if (existingConnection) {
+        console.log(`[INFO JOIN] Ya existe una conexión de voz para ${guild.id}. Estado: ${existingConnection.state.status}`);
+        if (existingConnection.joinConfig.channelId === voiceChannel.id &&
+            config.textChannel === textOutputChannel.id &&
+            (config.connection || config.recognizeStream)) { // Verifica config.connection o config.recognizeStream
+            return interaction.reply({
+                content: `✅ Ya estoy en ${voiceChannel.name}, usando ${textOutputChannel.name} y la transcripción está activa.`,
+                flags: MessageFlags.Ephemeral
+            });
+        } else {
+            console.log("[INFO JOIN] Conexión existente detectada en diferente estado o canal. Se intentará detener la escucha previa.");
+            const { stopListening } = require('../utils/voiceHandler.js');
+            stopListening(guild.id, config);
+            // Espera un poco para que la desconexión/limpieza se procese
+            await new Promise(resolve => setTimeout(resolve, 700)); // Aumentado a 0.7s
+            console.log("[INFO JOIN] Escucha previa detenida (si existía). Procediendo a unirse de nuevo.");
+        }
     }
 
-    await interaction.deferReply({ ephemeral: true }); // Mensajes de configuración solo para el usuario
+    await interaction.deferReply({ ephemeral: true });
 
     try {
-      console.log(`[JOIN] Usuario ${interaction.user.tag} ejecutó /join.`);
-      console.log(`[JOIN] Canal de voz detectado: ${voiceChannel.name} (ID: ${voiceChannel.id})`);
-      console.log(`[JOIN] Canal de texto para salida (actual): ${textOutputChannel.name} (ID: ${textOutputChannel.id})`);
+      console.log(`[INFO JOIN] Usuario ${interaction.user.tag} ejecutó /join.`);
+      console.log(`[INFO JOIN] Canal de voz detectado: ${voiceChannel.name} (ID: ${voiceChannel.id})`);
+      console.log(`[INFO JOIN] Canal de texto para salida (actual): ${textOutputChannel.name} (ID: ${textOutputChannel.id})`);
 
-      const connection = joinVoiceChannel({
-        channelId: voiceChannel.id,
-        guildId: guild.id,
-        adapterCreator: guild.voiceAdapterCreator,
-        selfDeaf: false,
-      });
-
+      // La conexión se establece dentro de startListening si es necesario.
+      // Aquí solo configuramos los IDs.
       config.voiceChannel = voiceChannel.id;
-      config.textChannel = textOutputChannel.id; // Usa el canal actual como canal de texto
-      console.log(`[CONFIG] Guardado voiceChannel ID: ${config.voiceChannel}`);
-      console.log(`[CONFIG] Guardado textChannel ID: ${config.textChannel}`);
+      config.textChannel = textOutputChannel.id;
+      console.log(`[CONFIG JOIN] Guardado voiceChannel ID: ${config.voiceChannel}`);
+      console.log(`[CONFIG JOIN] Guardado textChannel ID: ${config.textChannel}`);
 
       await interaction.editReply({
-          content: `✅ Me uní a ${voiceChannel.name}. Usaré **${textOutputChannel.name}** para las traducciones.\n🚀 Iniciando transcripción automáticamente...`
+          content: `✅ Configurando para ${voiceChannel.name}. Usaré **${textOutputChannel.name}** para las traducciones.\n🚀 Iniciando transcripción automáticamente...`
       });
 
-      // Iniciar automáticamente
       try {
           await startListening(guild, voiceChannel, textOutputChannel, config, client);
-          // startListening debería enviar sus propios mensajes de confirmación al textOutputChannel público
       } catch (startError) {
-          console.error('[JOIN - AUTOSTART ERROR]', startError);
-          await interaction.followUp({ // Mensaje efímero para el usuario que ejecutó /join
-              content: `❌ Error al iniciar automáticamente la transcripción. (Error: ${startError.message}). Puedes intentar \`/start\` manualmente si la configuración parece correcta.`,
+          console.error('[ERROR JOIN - AUTOSTART]', startError);
+          await interaction.followUp({
+              content: `❌ Error al iniciar automáticamente la transcripción. (Error: ${startError.message}). Puedes intentar \`/start\` manualmente.`,
               ephemeral: true
-          }).catch(console.error);
+          }).catch(e => console.error("[ERROR JOIN] Fallo en followUp de error de autostart:", e));
       }
 
     } catch (error) {
-      console.error(`[JOIN ERROR] Excepción general en /join:`, error);
-      config.voiceChannel = null;
-      config.textChannel = null;
-      if (interaction.replied || interaction.deferred) { // 'deferred' es true aquí
+      console.error(`[ERROR JOIN] Excepción general en /join:`, error);
+      if(config) {
+        config.voiceChannel = null;
+        config.textChannel = null;
+      }
+      if (interaction.replied || interaction.deferred) {
         await interaction.editReply({
-            content: `❌ Ocurrió un error procesando \`/join\`. Error: ${error.message}`
-        }).catch(e => {
-            console.error("[JOIN ERROR] Fallo al editar respuesta diferida:", e);
-            interaction.followUp({
-                content: `❌ Error en \`/join\`. Error: ${error.message}`,
-                ephemeral: true
-            }).catch(fe => console.error("[JOIN ERROR] Fallo en followUp de error:", fe));
+            content: `❌ Ocurrió un error crítico procesando \`/join\`. Error: ${error.message}`
+        }).catch(async e => {
+            console.error("[ERROR JOIN] Fallo al editar respuesta diferida principal:", e);
+            await interaction.followUp({ content: `❌ Error crítico en /join.`, ephemeral: true })
+                         .catch(fe => console.error("[ERROR JOIN] Fallo en followUp de error crítico:", fe));
         });
       }
     }
